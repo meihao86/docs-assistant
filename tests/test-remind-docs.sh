@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# docs-assistant: remind-docs.sh 单元测试
+set -uo pipefail
+HOOK="$(cd "$(dirname "$0")/.." && pwd)/hooks/remind-docs.sh"
+pass=0; fail=0
+
+run() { printf '%s' "$1" | bash "$HOOK"; }
+
+assert_contains() { # desc input needle
+  local out; out=$(run "$2")
+  if grep -q "$3" <<<"$out"; then echo "PASS: $1"; pass=$((pass+1));
+  else echo "FAIL: $1"; echo "  out: $out"; fail=$((fail+1)); fi
+}
+
+assert_empty() { # desc input
+  local out; out=$(run "$2")
+  if [[ -z "$out" ]]; then echo "PASS: $1"; pass=$((pass+1));
+  else echo "FAIL: $1"; echo "  out: $out"; fail=$((fail+1)); fi
+}
+
+assert_valid_json() { # desc input
+  local out; out=$(run "$2")
+  if jq empty <<<"$out" 2>/dev/null; then echo "PASS: $1"; pass=$((pass+1));
+  else echo "FAIL: $1"; echo "  out: $out"; fail=$((fail+1)); fi
+}
+
+assert_contains "git commit 触发提醒" \
+  '{"tool_name":"Bash","tool_input":{"command":"git commit -m hello"}}' \
+  "docs-maintainer"
+
+assert_valid_json "git commit 输出是合法 JSON" \
+  '{"tool_name":"Bash","tool_input":{"command":"git commit -m hello"}}'
+
+assert_contains "git push 触发提醒" \
+  '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' \
+  "docs-maintainer"
+
+assert_empty "非 git 命令不触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"npm test"}}'
+
+assert_empty "非 Bash 工具不触发" \
+  '{"tool_name":"Write","tool_input":{"file_path":"a.txt"}}'
+
+assert_empty "git commit --help 不触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"git commit --help"}}'
+
+echo "---"; echo "pass=$pass fail=$fail"
+[[ $fail -eq 0 ]]
