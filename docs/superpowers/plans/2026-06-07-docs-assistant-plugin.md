@@ -4,7 +4,7 @@
 
 **Goal:** 实现一个 Claude Code 插件 docs-assistant，包含一个 docs-maintainer 子 agent，在 git 提交后（或手动 /docs-update）检查自上次文档更新点以来的代码改动并同步更新 `docs/`、`README`、`CLAUDE.md`。
 
-**Architecture:** 插件由四部分组成：(1) `agents/docs-maintainer.md` 子 agent，承载全部文档维护逻辑（读 git diff、查 docs-map、快速跳过判断、改文档、推进书签）；(2) `commands/docs-update.md` 手动触发命令，由主线程用 Task 派出该子 agent；(3) `hooks/` 一个 PostToolUse hook，在 git commit/push 后注入非阻断提醒；(4) `.claude-plugin/plugin.json` 清单与 `README.md`。状态文件 `.docs-assistant/state.json` 与映射表 `.docs-assistant/docs-map.yaml` 写在被维护的目标仓库里，运行时由 agent 创建，不属于插件本体。
+**Architecture:** 插件由五部分组成：(1) `agents/docs-maintainer.md` 子 agent，承载全部文档维护逻辑（读 git diff、查 docs-map、快速跳过判断、改文档、推进书签）；(2) `commands/docs-update.md` 手动触发命令，由主线程用 Task 派出该子 agent；(3) `hooks/` 一个 PostToolUse hook，在 git commit/push 后注入非阻断提醒；(4) `.claude-plugin/plugin.json` 清单与 `.claude-plugin/marketplace.json`（单仓库即 marketplace，支持 `/plugin marketplace add` 一键注册）；(5) `README.md` 与 `tests/test-remind-docs.sh`（脚本单测）。状态文件 `.docs-assistant/state.json` 与映射表 `.docs-assistant/docs-map.yaml` 写在被维护的目标仓库里，运行时由 agent 创建，不属于插件本体。
 
 **Tech Stack:** Markdown（agent/command 定义）、JSON（plugin.json / hooks.json）、Bash + jq（hook 脚本与测试）。
 
@@ -19,7 +19,8 @@
 ```
 docs-assistant/
 ├── .claude-plugin/
-│   └── plugin.json              # 任务 1：插件清单
+│   ├── plugin.json              # 任务 1：插件清单
+│   └── marketplace.json         # 单仓库即 marketplace 的发布源定义
 ├── agents/
 │   └── docs-maintainer.md       # 任务 4：核心子 agent（model: sonnet）
 ├── commands/
@@ -29,6 +30,7 @@ docs-assistant/
 │   └── hooks.json               # 任务 3：hook 注册
 ├── tests/
 │   └── test-remind-docs.sh      # 任务 2：脚本单测
+├── .gitignore
 ├── README.md                    # 任务 6
 └── docs/superpowers/...         # 已有：spec 与本计划
 ```
@@ -71,7 +73,9 @@ git commit -m "feat: 添加插件清单 plugin.json"
 
 ## Task 2: PostToolUse 提醒脚本 remind-docs.sh（TDD）
 
-脚本职责：从 stdin 读 hook JSON，仅当 `tool_name=Bash` 且命令是 `git commit`/`git push`（排除 `--help`）时，向 stdout 输出 `hookSpecificOutput.additionalContext` JSON，提醒主线程派出 docs-maintainer；其余情况无输出。始终 exit 0（PostToolUse 无法阻断）。
+脚本职责：从 stdin 读 hook JSON，仅当 `tool_name=Bash` 且命令**真的在执行** `git commit`/`git push`（排除 `--help`）时，向 stdout 输出 `hookSpecificOutput.additionalContext` JSON，提醒主线程派出 docs-maintainer；其余情况无输出。始终 exit 0（PostToolUse 无法阻断）。
+
+> 精确匹配：**不能用子串匹配**，否则命令文本里仅“提及” `git commit/push`（如 `grep`/`echo`/注释/`git log --grep=commit`）会误触发。做法是按 shell 分隔符（`;` `|` `&` 换行）拆段，逐段判断该段（去掉前导 env 赋值后）是否以 `git` 开头、且其子命令（跳过全局选项）为 `commit`/`push`。
 
 **Files:**
 - Create: `tests/test-remind-docs.sh`
@@ -128,6 +132,29 @@ assert_empty "非 Bash 工具不触发" \
 assert_empty "git commit --help 不触发" \
   '{"tool_name":"Bash","tool_input":{"command":"git commit --help"}}'
 
+# —— 精确匹配：仅“真正执行” git commit/push 才触发，仅提及字样不触发 ——
+
+assert_empty "echo 仅提及 git commit 不触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"echo \"记得 git commit\""}}'
+
+assert_empty "grep 模式含 git push 不触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"grep -q \"git push\" notes.txt"}}'
+
+assert_empty "git log --grep=commit 不触发（子命令是 log）" \
+  '{"tool_name":"Bash","tool_input":{"command":"git log --grep=commit"}}'
+
+assert_contains "复合命令 npm test && git commit 触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"npm test && git commit -m x"}}' \
+  "docs-maintainer"
+
+assert_contains "git -c 全局选项后 commit 触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"git -c user.name=x commit -m y"}}' \
+  "docs-maintainer"
+
+assert_contains "前导 env 赋值后 git push 触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"GIT_SSH_COMMAND=ssh git push origin main"}}' \
+  "docs-maintainer"
+
 echo "---"; echo "pass=$pass fail=$fail"
 [[ $fail -eq 0 ]]
 ```
@@ -144,7 +171,7 @@ Expected: FAIL（`hooks/remind-docs.sh` 尚不存在，所有用例报错/失败
 ```bash
 #!/usr/bin/env bash
 # docs-assistant: PostToolUse hook
-# 在 git commit / git push 后，向主线程注入非阻断提醒，建议派出 docs-maintainer 更新文档。
+# 在“真正执行” git commit / git push 时，向主线程注入非阻断提醒，建议派出 docs-maintainer。
 set -euo pipefail
 
 input=$(cat)
@@ -160,10 +187,35 @@ if grep -Eq -- '--help|(^| )-h( |$)' <<<"$command"; then
   exit 0
 fi
 
-# 仅匹配 git commit / git push
-if ! grep -Eq '\bgit\b.*\b(commit|push)\b' <<<"$command"; then
-  exit 0
-fi
+# 判断命令是否“真的在执行” git commit / git push（避免子串误判）。
+# 按 shell 分隔符拆段，逐段判断：该段（去前导 env 赋值后）是否以 git 开头、且子命令为 commit/push。
+is_git_commit_or_push() {
+  local normalized seg
+  normalized=$(printf '%s' "$1" | tr ';|&\n' '\n\n\n\n')
+  while IFS= read -r seg; do
+    seg="${seg#"${seg%%[![:space:]]*}"}"
+    while [[ "$seg" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+ ]]; do
+      seg="${seg#*[[:space:]]}"
+      seg="${seg#"${seg%%[![:space:]]*}"}"
+    done
+    [[ "$seg" == "git" || "$seg" == git\ * ]] || continue
+    local toks i n t sub=""
+    read -r -a toks <<<"$seg"
+    n=${#toks[@]}; i=1
+    while (( i < n )); do
+      t="${toks[$i]}"
+      case "$t" in
+        -c|-C|--exec-path|--git-dir|--work-tree|--namespace) i=$((i + 2)); continue ;;
+        -*) i=$((i + 1)); continue ;;
+        *) sub="$t"; break ;;
+      esac
+    done
+    [[ "$sub" == "commit" || "$sub" == "push" ]] && return 0
+  done <<<"$normalized"
+  return 1
+}
+
+is_git_commit_or_push "$command" || exit 0
 
 read -r -d '' ctx <<'EOF' || true
 [docs-assistant] 检测到刚执行了 git commit/push，文档可能未与代码同步。
@@ -184,7 +236,7 @@ exit 0
 - [ ] **Step 4: 赋可执行权限并运行测试，确认通过**
 
 Run: `chmod +x hooks/remind-docs.sh && bash tests/test-remind-docs.sh`
-Expected: 全部 `PASS`，末行 `pass=6 fail=0`，退出码 0。
+Expected: 全部 `PASS`，末行 `pass=12 fail=0`，退出码 0。
 
 - [ ] **Step 5: 提交**
 
@@ -277,17 +329,19 @@ model: sonnet
 - 这是首次运行，需要用户决定起点。**由于你是被派出的子 agent，不要擅自猜测**：直接结束并向主线程返回一个明确的决策请求，内容包含两个选项：
   - A) 补齐历史文档：从仓库首个提交开始全量梳理并补文档；
   - B) 从当前 HEAD 起算：仅记录基线，之后只维护增量。
+- 正常情况下 `/docs-update` 命令已在主线程问过用户并把 A/B 选择写进任务，agent 据此直接执行，不再追问；仅当任务未给出选择时才返回决策请求。
 - 同时检查：若仓库无 `CLAUDE.md`，提示用户可用内置 `/init` 生成。
-- 待主线程带着用户选择重新派你时：
-  - 选 A：以首个提交为区间起点执行第 4 步；
-  - 选 B：不回填，直接把当前 HEAD 写入 state.json 作为基线（见第 5 步格式），并汇报"已建立基线，从下次改动起维护"。
+- 拿到选择后：
+  - 选 A：以首个提交为区间起点执行第 4 步及之后流程（按第 6 步定向提交）；
+  - 选 B：把当前 HEAD 写入 state.json 作为基线，按第 6 步**定向提交该基线文件**，汇报"已建立基线，从下次改动起维护"。
 
 ### 3. 计算增量（state.json 存在）
 - 读取 `last_documented_commit`，运行 `git diff --name-only <last_documented_commit>..HEAD` 得到改动文件清单，必要时用 `git diff <last_documented_commit>..HEAD` 看具体改动。
-- 若 `last_documented_commit == HEAD`：无新提交，直接汇报"文档已是最新"并结束。
+- **同时 `git status --porcelain` 检查工作区**：区间 diff 看不到未提交改动；若有未提交的源码改动（手动触发常见），一并纳入分析，或提示用户先提交。
+- 若 `last_documented_commit == HEAD` 且工作区无相关改动：无新内容，直接汇报"文档已是最新"并结束。
 
 ### 4. 快速跳过判断（命中即结束）
-若**全部**改动都属于以下"无需更新"情形，则立即汇报"无需更新文档"，**仍执行第 6 步推进书签**，然后结束：
+若**全部**改动都属于以下"无需更新"情形，则立即汇报"无需更新文档"，**不写 state.json、不提交、不动书签**，然后结束：
 - 纯内部重构，不改公开接口 / CLI / 配置 / 对外行为
 - 测试文件（`test/`、`*_test.*`、`*.spec.*` 等）
 - 格式化 / lint / import 排序 / 纯空白
@@ -305,15 +359,18 @@ model: sonnet
 - 阅读相关代码改动与对应文档，**直接编辑**需要更新的文档，使其与当前代码一致。保持原文档风格与语言。
 - **半自动补表**：若发现某"代码↔文档"关系不在映射表中，向 `.docs-assistant/docs-map.yaml` 追加一条（文件不存在则创建），并在汇报中说明新增了哪些条目。
 
-### 6. 推进书签
-- 把 `.docs-assistant/state.json` 写为：`last_documented_commit` = 当前 `git rev-parse HEAD`，`updated_at` = 当前 ISO8601 时间，保留/补全 `tracked_paths`（默认 `["docs/","README.md","CLAUDE.md"]`）。
-- 即便第 4 步判定"无需更新"，也必须执行本步，否则这些提交下次会被重复评估。
+### 6. 提交并推进书签（仅当第 5 步真的改了文档）
+> 无需更新时（第 4 步跳过或文档已一致）**不写 state.json、不提交、不动书签**，否则自动提交会因书签提交自身又触发处理而死循环。
+- 用 `date -Iseconds` 取**真实**时间戳，不要编造。
+- 把 `.docs-assistant/state.json` 写为：`last_documented_commit` = 当前 `git rev-parse HEAD`，`updated_at` = 真实时间，保留/补全 `tracked_paths`（默认 `["docs/","README.md","CLAUDE.md"]`）。
+- **定向提交**：`git add` 仅本次改动的文档 + `.docs-assistant/state.json` +（如有）`.docs-assistant/docs-map.yaml`，再 `git commit -m "docs: 同步文档（<简述>）"`；**绝不 `git add -A/-u`**，**不 `git push`**。
 
 ### 7. 汇报
-向主线程返回：改了哪些文档及原因、是否新增了 docs-map 条目、书签推进到哪个 SHA。提醒用户：文档改动留在工作区，请用 `git diff` 复查后自行决定何时提交（本 agent 不替你提交文档改动）。
+向主线程返回：改了哪些文档及原因、是否新增 docs-map 条目、本次本地提交的 commit message 与 SHA、书签 SHA。提醒用户：改动已本地提交（未 push），push 前用 `git log`/`git show` 复查，不满意可 `git reset` 回退。
 
 ## 约束
-- 不修改源码、不执行 `git commit`/`git push`（文档改动交由用户提交）。
+- 只对文档与 `.docs-assistant/` 做**定向** `git commit`；不修改源码；**不 `git push`**。
+- 无需更新时不写 state.json、不提交、不动书签（避免自动提交死循环）；书签只在文档真有改动时前移，落后 HEAD 属正常。
 - 不阻断任何流程；映射表缺失或不全只是退化为全量判断，绝不报错中断。
 ```
 
@@ -336,7 +393,7 @@ git commit -m "feat: 添加 docs-maintainer 子 agent"
 
 ## Task 5: 手动触发命令 docs-update.md
 
-命令体是给主线程的指令：用 Task 派出 docs-maintainer，并处理冷启动时的用户交互中转（因为子 agent 无法直接与用户交互）。
+命令体是给主线程的指令：冷启动交互在主线程先完成，再**单次**用 Task 派出 docs-maintainer（不依赖 SendMessage 续接子 agent）。
 
 **Files:**
 - Create: `commands/docs-update.md`
@@ -348,13 +405,13 @@ git commit -m "feat: 添加 docs-maintainer 子 agent"
 description: 检查代码改动并同步更新文档（docs/、README、CLAUDE.md）
 ---
 
-用 Task 工具派出 `docs-maintainer` 子 agent，让它按自身流程检查自上次文档更新点以来的代码改动并更新文档。
+目标：派出 `docs-maintainer` 子 agent 检查自上次文档更新点以来的代码改动并更新文档。冷启动交互在主线程先完成，再一次性派 agent。
 
-交互中转规则：
-- 若子 agent 返回的是"冷启动决策请求"（首次运行，询问"补齐历史 / 从当前 HEAD 起算"），请用 AskUserQuestion 把这两个选项呈现给用户，拿到选择后，带着该选择重新用 Task 派出 docs-maintainer。
-- 若子 agent 提示仓库缺少 CLAUDE.md，转达给用户：可运行内置 `/init` 生成。
-
-子 agent 完成后，把它的汇报（改了哪些文档、是否新增 docs-map 条目、书签推进到哪个 SHA）转达给用户，并提醒用户用 `git diff` 复查文档改动后自行提交。
+## 步骤
+1. **判断是否冷启动**：检查目标仓库是否存在 `.docs-assistant/state.json`。
+   - **不存在**：用 AskUserQuestion 让用户选起点（A 补齐历史 / B 从当前 HEAD 起算）；若缺 `CLAUDE.md` 提示用户可用 `/init`。拿到选择后用 Task 派出 docs-maintainer，并在任务里写明 A 还是 B。
+   - **已存在**：直接用 Task 派出 docs-maintainer 跑增量。
+2. **转达结果**：把子 agent 的汇报转达用户——改了哪些文档、是否新增 docs-map、本次本地提交的 commit message 与 SHA、书签 SHA；提醒用户改动已本地提交（未 push），push 前可 `git log`/`git show` 复查，不满意 `git reset` 回退。
 ```
 
 - [ ] **Step 2: 校验结构**
@@ -394,7 +451,9 @@ git commit -m "feat: 添加 /docs-update 手动触发命令"
 ## 工作机制
 - 书签存于目标仓库 `.docs-assistant/state.json`，记录文档已覆盖到的 commit。每次只处理增量。
 - 可选映射表 `.docs-assistant/docs-map.yaml`（"代码路径 → 关联文档"）加速定位；缺失时回退到全量判断。
-- 文档改动直接写入工作区，由你 `git diff` 复查后自行提交；插件不替你提交。
+- agent 改完文档后**定向自动本地提交**（仅文档 + `.docs-assistant/`，不裹入你其它改动，也**不 push**），保持工作区干净；push 前用 `git log`/`git show` 复查即可。
+- `.docs-assistant/state.json` 与 `docs-map.yaml` **应纳入版本管理**（勿 gitignore）。
+- 书签只在文档真有改动时前移，稳态下通常落后 HEAD 一个文档提交，属正常。
 
 ## 安装
 将本插件目录加入 Claude Code 插件路径（参见 Claude Code 插件文档）。

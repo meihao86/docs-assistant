@@ -44,5 +44,28 @@ assert_empty "非 Bash 工具不触发" \
 assert_empty "git commit --help 不触发" \
   '{"tool_name":"Bash","tool_input":{"command":"git commit --help"}}'
 
+# —— 精确匹配：仅“真正执行” git commit/push 才触发，仅提及字样不触发 ——
+
+assert_empty "echo 仅提及 git commit 不触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"echo \"记得 git commit\""}}'
+
+assert_empty "grep 模式含 git push 不触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"grep -q \"git push\" notes.txt"}}'
+
+assert_empty "git log --grep=commit 不触发（子命令是 log）" \
+  '{"tool_name":"Bash","tool_input":{"command":"git log --grep=commit"}}'
+
+assert_contains "复合命令 npm test && git commit 触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"npm test && git commit -m x"}}' \
+  "docs-maintainer"
+
+assert_contains "git -c 全局选项后 commit 触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"git -c user.name=x commit -m y"}}' \
+  "docs-maintainer"
+
+assert_contains "前导 env 赋值后 git push 触发" \
+  '{"tool_name":"Bash","tool_input":{"command":"GIT_SSH_COMMAND=ssh git push origin main"}}' \
+  "docs-maintainer"
+
 echo "---"; echo "pass=$pass fail=$fail"
 [[ $fail -eq 0 ]]

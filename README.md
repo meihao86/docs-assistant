@@ -10,7 +10,9 @@
 ## 工作机制
 - 书签存于目标仓库 `.docs-assistant/state.json`，记录文档已覆盖到的 commit。每次只处理增量。
 - 可选映射表 `.docs-assistant/docs-map.yaml`（"代码路径 → 关联文档"）加速定位；缺失时回退到全量判断。
-- 文档改动直接写入工作区，由你 `git diff` 复查后自行提交；插件不替你提交。
+- agent 改完文档后会**定向自动本地提交**（仅文档 + `.docs-assistant/`，绝不裹入你其它改动，也**不会 push**），保持工作区干净。你在 `git push` 前用 `git log` / `git show` 复查即可，不满意 `git reset` 回退。
+- `.docs-assistant/state.json` 与 `docs-map.yaml` **应纳入版本管理**（不要 gitignore），否则新克隆会重新冷启动、团队无法共享书签。
+- 书签只在"文档真有改动"时前移，稳态下通常落后 HEAD 一个文档提交，属正常。
 
 ## 快速开始
 

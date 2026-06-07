@@ -1,0 +1,20 @@
+# docs-assistant 插件仓库：代码路径(glob) → 关联文档
+# 由 docs-maintainer 半自动生成，可手动补充
+
+# 插件清单与 marketplace 定义 → README（安装方式）
+".claude-plugin/**":
+  - "README.md"
+
+# 子 agent 定义 → 设计文档（工作流章节）、README（组成章节）
+"agents/**":
+  - "README.md"
+  - "docs/superpowers/specs/2026-06-07-docs-assistant-plugin-design.md"
+
+# 手动触发命令 → README（使用章节）
+"commands/**":
+  - "README.md"
+
+# hook 脚本与配置 → README（组成/工作机制章节）、设计文档（触发入口章节）
+"hooks/**":
+  - "README.md"
+  - "docs/superpowers/specs/2026-06-07-docs-assistant-plugin-design.md"
