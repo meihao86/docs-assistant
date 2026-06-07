@@ -1,0 +1,14 @@
+{
+  "name": "docs-assistant",
+  "owner": {
+    "name": "meihao"
+  },
+  "description": "docs-assistant 插件的发布源（单仓库即插件即 marketplace）",
+  "plugins": [
+    {
+      "name": "docs-assistant",
+      "source": "./",
+      "description": "代码改动后自动维护文档：检查自上次更新点以来的提交，同步 docs/、README、CLAUDE.md。"
+    }
+  ]
+}
