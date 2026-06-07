@@ -1,0 +1,8 @@
+{
+  "name": "docs-assistant",
+  "version": "0.1.0",
+  "description": "代码改动后自动维护文档：检查自上次更新点以来的提交，同步 docs/、README、CLAUDE.md。",
+  "author": {
+    "name": "meihao"
+  }
+}
